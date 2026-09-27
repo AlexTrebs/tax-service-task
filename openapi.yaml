@@ -1,0 +1,163 @@
+openapi: 3.0.3
+info:
+  title: Novabook Tax Service
+  version: 1.0.0
+  description: |
+    Ingests sales and tax payment events and reports the tax position at any point in time.
+    All money values are integer pennies. Dates are ISO 8601 date-times with a timezone.
+servers:
+  - url: http://localhost:3000
+paths:
+  /transactions:
+    post:
+      summary: Ingest a sales or tax payment event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/SaleEvent"
+                - $ref: "#/components/schemas/TaxPaymentEvent"
+              discriminator:
+                propertyName: eventType
+            examples:
+              sale:
+                value:
+                  eventType: SALES
+                  date: "2024-02-22T17:29:39Z"
+                  invoiceId: 3419027d-960f-4e8f-b8b7-f7b2b4791824
+                  items:
+                    - itemId: 02db47b6-fe68-4005-a827-24c6e962f3df
+                      cost: 1099
+                      taxRate: 0.2
+              taxPayment:
+                value:
+                  eventType: TAX_PAYMENT
+                  date: "2024-02-22T17:29:39Z"
+                  amount: 74901
+      responses:
+        "202": { description: Accepted }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "413": { description: Body larger than 1 MB }
+        "415": { description: Content-Type is not application/json }
+  /sale:
+    patch:
+      summary: Amend an item within a sale at a point in time
+      description: |
+        Accepted even if the sale or item does not exist yet. Takes effect from
+        max(amendment date, sale date). If the item is not in the sale, it is added.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Amendment" }
+            example:
+              date: "2024-02-22T17:29:39Z"
+              invoiceId: 3419027d-960f-4e8f-b8b7-f7b2b4791824
+              itemId: 02db47b6-fe68-4005-a827-24c6e962f3df
+              cost: 798
+              taxRate: 0.15
+      responses:
+        "202": { description: Accepted }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "413": { description: Body larger than 1 MB }
+        "415": { description: Content-Type is not application/json }
+  /tax-position:
+    get:
+      summary: Tax position at a point in time
+      parameters:
+        - name: date
+          in: query
+          required: true
+          schema: { type: string, format: date-time, example: "2024-02-22T17:29:39Z" }
+      responses:
+        "200":
+          description: Tax position (sales tax minus tax payments, in pennies)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [date, taxPosition]
+                properties:
+                  date: { type: string, format: date-time }
+                  taxPosition:
+                    type: number
+                    description: Whole pennies. Each item's tax is rounded half up. Negative if overpaid.
+              example: { date: "2024-02-22T17:29:39Z", taxPosition: 49 }
+        "400": { $ref: "#/components/responses/ValidationError" }
+  /health:
+    get:
+      summary: Liveness and database check
+      responses:
+        "200": { description: Healthy }
+        "503": { description: Database unreachable, or the service is shutting down }
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      responses:
+        "200": { description: Prometheus text exposition format }
+components:
+  schemas:
+    DateTime:
+      type: string
+      format: date-time
+      description: ISO 8601 with timezone (Z or ±hh:mm)
+    Pennies:
+      type: integer
+      minimum: 0
+    TaxRate:
+      type: number
+      minimum: 0
+      maximum: 1
+    SaleItem:
+      type: object
+      required: [itemId, cost, taxRate]
+      properties:
+        itemId: { type: string, minLength: 1 }
+        cost: { $ref: "#/components/schemas/Pennies" }
+        taxRate: { $ref: "#/components/schemas/TaxRate" }
+    SaleEvent:
+      type: object
+      required: [eventType, date, invoiceId, items]
+      properties:
+        eventType: { type: string, enum: [SALES] }
+        date: { $ref: "#/components/schemas/DateTime" }
+        invoiceId: { type: string, minLength: 1 }
+        items:
+          type: array
+          minItems: 1
+          description: itemId must be unique within the invoice
+          items: { $ref: "#/components/schemas/SaleItem" }
+    TaxPaymentEvent:
+      type: object
+      required: [eventType, date, amount]
+      properties:
+        eventType: { type: string, enum: [TAX_PAYMENT] }
+        date: { $ref: "#/components/schemas/DateTime" }
+        amount: { $ref: "#/components/schemas/Pennies" }
+    Amendment:
+      type: object
+      required: [date, invoiceId, itemId, cost, taxRate]
+      properties:
+        date: { $ref: "#/components/schemas/DateTime" }
+        invoiceId: { type: string, minLength: 1 }
+        itemId: { type: string, minLength: 1 }
+        cost: { $ref: "#/components/schemas/Pennies" }
+        taxRate: { $ref: "#/components/schemas/TaxRate" }
+  responses:
+    ValidationError:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string, example: ValidationError }
+              details:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    path: { type: string }
+                    message: { type: string }
